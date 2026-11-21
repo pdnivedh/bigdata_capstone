@@ -199,7 +199,10 @@ def tune(args):
         r = recall_at_k(P, W, uids, iids, val, k=args.k)
         results.append(dict(weight=weight, alpha=alpha, beta=beta, recall_at_k=r, iters=n_it))
         print(f"weight={weight:11s} alpha={alpha:.2f} beta={beta:.2f}  Recall@{args.k}={r:.4f}  iters={n_it}")
-    # popularity baseline for context
+    # popularity baseline = most-rated items in the inner-train graph.
+    # Built explicitly from the binary graph so it does not depend on which
+    # edge-weight scheme happened to be last in the grid loop.
+    W, uids, iids = build_graph(inner, weight="binary")
     pop = np.asarray(W.sum(axis=0)).ravel()
     P_pop = np.tile(pop[:, None], (1, W.shape[0]))
     r_pop = recall_at_k(P_pop, W, uids, iids, val, k=args.k)
