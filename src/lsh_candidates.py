@@ -1,10 +1,19 @@
 
+import argparse
 import time
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 from pyspark.ml.feature import MinHashLSH
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--top-genres", type=int, default=5)
+parser.add_argument("--tables", type=int, default=4)
+parser.add_argument("--threshold", type=float, default=0.8)
+args = parser.parse_args()
+TOP_K, TABLES, THRESHOLD = args.top_genres, args.tables, args.threshold
+OUT_PATH = f"data/processed/lsh_candidates_top{TOP_K}_{TABLES}"
 
 spark = (
     SparkSession.builder
@@ -18,7 +27,7 @@ spark.sparkContext.setLogLevel("ERROR")
 
 # Load feature vectors
 users = spark.read.parquet(
-    "data/processed/user_features_top5"
+    f"data/processed/user_features_top{TOP_K}"
 )
 
 items = spark.read.parquet(
@@ -48,7 +57,7 @@ start_time = time.perf_counter()
 lsh = MinHashLSH(
     inputCol="features",
     outputCol="hashes",
-    numHashTables=4,
+    numHashTables=TABLES,
     seed=42
 )
 
@@ -58,7 +67,7 @@ model = lsh.fit(items)
 matches = model.approxSimilarityJoin(
     users,
     items,
-    0.8,
+    THRESHOLD,
     distCol="jaccard_distance"
 )
 
@@ -124,7 +133,7 @@ top_candidates = (
 
 # Save output for the graph-ranking stage
 top_candidates.write.mode("overwrite").parquet(
-    "data/processed/lsh_candidates_top5_4"
+    OUT_PATH
 )
 
 elapsed = time.perf_counter() - start_time

@@ -8,3 +8,4 @@ results/
 
 .env
 .vscode/
+*.tar.gz
