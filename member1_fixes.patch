@@ -1,0 +1,193 @@
+diff --git a/requirements.txt b/requirements.txt
+index d88e4fd..39c14f2 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,2 +1,5 @@
+ pyspark==4.1.3
+-numpy>=2.3,<3
+\ No newline at end of file
++numpy>=2.3,<3
++pandas
++scipy
++pyarrow
+diff --git a/src/build_features.py b/src/build_features.py
+index 85e93d1..499705c 100644
+--- a/src/build_features.py
++++ b/src/build_features.py
+@@ -1,8 +1,16 @@
++import argparse
++
+ from pyspark.sql.window import Window
+ from pyspark.sql import SparkSession
+ from pyspark.sql import functions as F
+ from pyspark.ml.feature import CountVectorizer
+ 
++parser = argparse.ArgumentParser()
++parser.add_argument("--top-genres", type=int, default=5,
++                    help="number of preferred genres kept per user profile")
++args = parser.parse_args()
++TOP_K = args.top_genres
++
+ spark = (
+     SparkSession.builder
+     .appName("MovieLensFeatureEngineering")
+@@ -55,7 +63,7 @@ liked_movies = (
+ )
+ 
+ 
+-# Build user profiles using top 3 preferred genres
++# Build user profiles using the top-K preferred genres (K = --top-genres)
+ 
+ # Extract genres from positively rated movies
+ liked_genres = liked_movies.select(
+@@ -81,10 +89,10 @@ genre_window = Window.partitionBy(
+ top_genres = (
+     genre_counts
+     .withColumn("rank", F.row_number().over(genre_window))
+-    .filter(F.col("rank") <= 5)
++    .filter(F.col("rank") <= TOP_K)
+ )
+ 
+-# Collect the top 3 genres
++# Collect the top-K genres
+ user_genres = top_genres.groupBy("user_id").agg(
+     F.collect_list("genre").alias("tokens")
+ )
+@@ -102,7 +110,7 @@ item_features.write.mode("overwrite").parquet(
+ )
+ 
+ user_features.write.mode("overwrite").parquet(
+-    "data/processed/user_features_top5"
++    f"data/processed/user_features_top{TOP_K}"
+ )
+ 
+ print("\n===== FEATURE ENGINEERING RESULTS =====")
+diff --git a/src/evaluate_lsh.py b/src/evaluate_lsh.py
+index fb63464..5f66dbf 100644
+--- a/src/evaluate_lsh.py
++++ b/src/evaluate_lsh.py
+@@ -1,3 +1,4 @@
++import os
+ 
+ from pyspark.sql import SparkSession
+ from pyspark.sql import functions as F
+@@ -21,7 +22,7 @@ test = spark.read.parquet(
+ )
+ 
+ users = spark.read.parquet(
+-    "data/processed/user_features"
++    "data/processed/user_features_top5"
+ ).select("user_id")
+ 
+ # Only movies present in the training graph
+@@ -44,15 +45,22 @@ print("\n===== LSH EVALUATION =====")
+ print("Eligible relevant test interactions:", total_relevant)
+ print("Users with relevant test movies:", total_users)
+ 
++# (top-K genres, hash tables). Generate them with: python src/run_lsh_grid.py
++GRID = [(3, 2), (3, 4), (3, 8), (5, 4)]
+ experiments = {
+-    "Top-3, 2 tables": "data/processed/lsh_candidates_tuning_2",
+-    "Top-3, 4 tables": "data/processed/lsh_candidates_top100",
+-    "Top-3, 8 tables": "data/processed/lsh_candidates_tuning_8",
+-    "Top-5, 4 tables": "data/processed/lsh_candidates_top5_4"
++    f"Top-{k}, {t} tables": f"data/processed/lsh_candidates_top{k}_{t}"
++    for k, t in GRID
+ }
+ 
++print("\nWARNING: this evaluation uses ratings_test, so any configuration")
++print("chosen from it gives a DEVELOPMENT estimate, not an unbiased final one.")
++
+ for name, path in experiments.items():
+ 
++    if not os.path.exists(path):
++        print(f"\nSkipping {name}: {path} not found")
++        continue
++
+     candidates = (
+         spark.read.parquet(path)
+         .select("user_id", "item_id")
+diff --git a/src/lsh_candidates.py b/src/lsh_candidates.py
+index 875ec7d..74ef76d 100644
+--- a/src/lsh_candidates.py
++++ b/src/lsh_candidates.py
+@@ -1,4 +1,5 @@
+ 
++import argparse
+ import time
+ 
+ from pyspark.sql import SparkSession
+@@ -6,6 +7,14 @@ from pyspark.sql import functions as F
+ from pyspark.sql.window import Window
+ from pyspark.ml.feature import MinHashLSH
+ 
++parser = argparse.ArgumentParser()
++parser.add_argument("--top-genres", type=int, default=5)
++parser.add_argument("--tables", type=int, default=4)
++parser.add_argument("--threshold", type=float, default=0.8)
++args = parser.parse_args()
++TOP_K, TABLES, THRESHOLD = args.top_genres, args.tables, args.threshold
++OUT_PATH = f"data/processed/lsh_candidates_top{TOP_K}_{TABLES}"
++
+ spark = (
+     SparkSession.builder
+     .appName("MovieLensLSH")
+@@ -18,7 +27,7 @@ spark.sparkContext.setLogLevel("ERROR")
+ 
+ # Load feature vectors
+ users = spark.read.parquet(
+-    "data/processed/user_features_top5"
++    f"data/processed/user_features_top{TOP_K}"
+ )
+ 
+ items = spark.read.parquet(
+@@ -48,7 +57,7 @@ start_time = time.perf_counter()
+ lsh = MinHashLSH(
+     inputCol="features",
+     outputCol="hashes",
+-    numHashTables=4,
++    numHashTables=TABLES,
+     seed=42
+ )
+ 
+@@ -58,7 +67,7 @@ model = lsh.fit(items)
+ matches = model.approxSimilarityJoin(
+     users,
+     items,
+-    0.8,
++    THRESHOLD,
+     distCol="jaccard_distance"
+ )
+ 
+@@ -124,7 +133,7 @@ top_candidates = (
+ 
+ # Save output for the graph-ranking stage
+ top_candidates.write.mode("overwrite").parquet(
+-    "data/processed/lsh_candidates_top5_4"
++    OUT_PATH
+ )
+ 
+ elapsed = time.perf_counter() - start_time
+diff --git a/src/run_lsh_grid.py b/src/run_lsh_grid.py
+new file mode 100644
+index 0000000..915a6bc
+--- /dev/null
++++ b/src/run_lsh_grid.py
+@@ -0,0 +1,17 @@
++"""Regenerate every LSH configuration reported in the README so the
++Recall@100 table can be reproduced from the repository alone.
++
++Run from the repository root:  python src/run_lsh_grid.py
++"""
++import subprocess
++import sys
++
++GRID = [(3, 2), (3, 4), (3, 8), (5, 4)]   # (top-K genres, hash tables)
++
++for k, t in GRID:
++    print(f"\n=== top-{k} genres, {t} hash tables ===")
++    subprocess.run([sys.executable, "src/build_features.py", "--top-genres", str(k)], check=True)
++    subprocess.run([sys.executable, "src/lsh_candidates.py", "--top-genres", str(k), "--tables", str(t)], check=True)
++
++# leave the final configuration's features in place
++print("\nDone. Now run: python src/evaluate_lsh.py")
