@@ -136,3 +136,145 @@ from Git because they are derived datasets.
 - Runtime measurements are single-run observations.
 - A separate validation/final-test protocol is needed
   for unbiased final evaluation.
+
+
+
+## Stage 2: Graph Construction and Personalized BiRank (Member 2)
+
+This stage takes Member 1's 100 LSH candidates per user and re-ranks them with
+personalized BiRank on a user-movie bipartite graph built from the full training
+ratings. Its output is passed to Member 3 for evaluation.
+
+```
+ratings_train ──► bipartite graph (610 users x 8,230 movies, 80,419 edges)
+                         │
+member1_candidates_top100 ──► personalized BiRank ──► re-ranked candidates
+```
+
+The candidate list only decides **which movies may be ranked**. The graph always
+uses **all** training interactions, not just the candidates.
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `src/birank_rerank.py` | Tuning (`tune`) and final re-ranking (`rerank`). Pure pandas/scipy, no Spark needed. |
+| `src/crosscheck_networkx.py` | Verifies our BiRank scores against `networkx.bipartite.birank`. |
+| `birank_tuning_results.csv` | Validation results for every tuned configuration. |
+| `data/processed/member2_birank_ranked.parquet` | All 100 candidates per user, re-ranked. |
+| `data/processed/member2_birank_ranked_top20.parquet` | Top-20 per user. |
+| `data/processed/member2_birank_ranked_settings.json` | Exact settings used for the final run. |
+
+### Setup
+
+```bash
+pip install -r requirements.txt
+pip install -U "networkx>=3.5"   # only needed for the cross-check
+```
+
+`src/birank_rerank.py` does not use Spark, so it runs on Windows without Hadoop/winutils.
+(Member 1's Spark scripts do need a working Spark install; on Windows, running them
+inside Docker or WSL avoids the `winutils.exe` error.)
+
+### Usage
+
+```bash
+# 1. Tune on a validation split carved out of ratings_train (ratings_test is never read)
+python src/birank_rerank.py tune --data data/processed --weights rating binary --alphas 0.7 0.85 0.95 --betas 0.05 0.1 0.2
+
+# 2. Final re-ranking with the chosen settings
+python src/birank_rerank.py rerank --data data/processed --weight rating --alpha 0.7 --beta 0.1 --topn 20
+
+# 3. Verify against NetworkX
+python src/crosscheck_networkx.py --data data/processed --weight rating --alpha 0.7 --beta 0.1
+```
+
+### Method
+
+**Graph.** Users and movies are the two node types. Each training rating is an edge,
+weighted by the rating value (1 to 5). Three schemes were compared: `binary`,
+`rating` and `thresholded` (only ratings of 4 or higher create edges).
+
+**BiRank.** With `W` the user-movie weight matrix and `S = D_u^(-1/2) W D_p^(-1/2)`:
+
+```
+p <- alpha * S^T u + (1 - alpha) * p0      (movie scores; alpha = movie-side damping)
+u <- beta  * S   p + (1 - beta)  * u0      (user scores;  beta  = user-side damping)
+```
+
+iterated until the largest score change is below `1e-6`. For each target user, `u0` is
+the indicator of that user's node and `p0` is that user's rating history normalised to
+sum to 1, so every user receives a personal ranking. All 610 users are computed in one
+batch with sparse matrices.
+
+**Re-ranking.** Each user's 100 candidates are sorted by BiRank score. Ties are broken by
+the original LSH rank, so results are deterministic. A user with no training ratings would
+keep the LSH order (none of the 610 users are affected).
+
+### Tuning protocol (no test data used)
+
+The last 20% of each user's *training* ratings (chronological) are held out as a
+validation set, the graph is built from the remaining 80%, and Recall@100 is measured
+over **all unseen movies**, averaged over users. This is not restricted to the LSH
+candidates because candidates exclude already-rated movies and so cannot contain
+validation items.
+
+| Edge weight | alpha | beta | Validation Recall@100 |
+|---|---|---|---|
+| **rating** | **0.70** | **0.10** | **0.4122** (final choice) |
+| rating | 0.70 | 0.05 | 0.4118 |
+| rating | 0.85 | 0.10 | 0.4105 |
+| rating | 0.50 | 0.50 | 0.4021 |
+| binary | 0.85 | 0.50 | 0.3988 |
+| thresholded | 0.50 | 0.50 | 0.3762 |
+| *popularity baseline (most-rated)* | | | *0.2542* |
+
+BiRank converged in 5 iterations with the final settings. Small `beta` values worked
+consistently best, and the top configurations differ by less than 0.003, so the exact
+optimum is not distinguishable from a single validation split.
+
+### Verification
+
+`src/crosscheck_networkx.py` rebuilds the same graph and personalization in NetworkX and
+compares rankings over unseen movies. For five random users: Spearman correlation
+`1.0000` and `100/100` top-100 movies in common.
+
+### Output schema (`member2_birank_ranked.parquet`)
+
+| Column | Meaning |
+|---|---|
+| `user_id`, `item_id` | User and candidate movie |
+| `similarity` | Member 1's LSH genre similarity (0 for popularity fallback) |
+| `lsh_rank` | Member 1's original candidate rank (1 to 100) |
+| `candidate_source` | `lsh` or `popularity_fallback` |
+| `birank_score` | Personalized BiRank score |
+| `birank_used` | `True` if the user had training ratings and was re-ranked |
+| `rank` | **New BiRank rank (1 to 100).** Use this for the proposed pipeline. |
+
+To compare LSH order with BiRank order on the same candidates, sort by `lsh_rank`
+versus `rank`.
+
+### Important notes
+
+- `ratings_test` was never used for graph construction or tuning.
+- Validation Recall@100 (about 0.41) measures BiRank over all unseen movies. It is **not**
+  comparable to the final pipeline, which re-ranks only 100 candidates whose own recall
+  is low (4.92% in development). BiRank's final gain is bounded by candidate quality.
+- Tuning used a single validation split.
+- Member 1 selected the LSH configuration using test ratings, so absolute candidate
+  recall is optimistic. All ranking methods share the same candidates, so comparisons
+  between them remain fair.
+- The training graph has 8,230 movies, while Member 1 reports 8,215 movies in the LSH
+  catalog. The difference is probably movies without genre tags being dropped from the
+  LSH features (to be confirmed by Member 1).
+
+### Results (to be filled by Member 3)
+
+| Method | Precision@10 | Recall@10 | NDCG@10 |
+|---|---|---|---|
+| Popularity | | | |
+| LSH order | | | |
+| LSH + BiRank (proposed) | | | |
+| Item-based CF | | | |
+| ALS | | | |
+
