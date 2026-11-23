@@ -278,3 +278,72 @@ versus `rank`.
 | Item-based CF | | | |
 | ALS | | | |
 
+## Member 3: Baselines, evaluation and deployment
+
+### Evaluation protocol
+- A test item is relevant if its rating is >= 4 ("liked"). Users with no liked test items are skipped, which leaves 592 of 610 users.
+- Metrics: Precision@K, Recall@K, NDCG@K, Hit rate@K at K = 10 (primary) and K = 20. The full set, including K = 20 and a graph-only variant, is in `results/summary_pipeline.csv`.
+- `ratings_test` was used once for the final numbers. ALS was tuned only on a validation split taken from `ratings_train` (last 20% of each user's history); frozen settings: rank 30, regParam 0.1, maxIter 20, implicit feedback.
+
+### Results (strict relevance, K = 10)
+
+Same 100 LSH candidates per user (isolates ranking quality):
+
+| Method | Precision@10 | Recall@10 | NDCG@10 | Hit rate@10 |
+|---|---|---|---|---|
+| LSH order | 0.0103 | 0.0107 | 0.0135 | 0.0946 |
+| Popularity | 0.0296 | 0.0273 | 0.0416 | 0.2230 |
+| Item-based CF | 0.0340 | 0.0333 | 0.0493 | 0.2568 |
+| ALS | 0.0331 | 0.0330 | 0.0478 | 0.2568 |
+| **LSH + BiRank** | **0.0392** | **0.0357** | **0.0557** | **0.2855** |
+
+End to end (baselines rank the whole unseen catalog; the pipeline is limited to its 100 candidates):
+
+| Method | Precision@10 | Recall@10 | NDCG@10 | Hit rate@10 |
+|---|---|---|---|---|
+| Popularity | 0.0578 | 0.0487 | 0.0753 | 0.3226 |
+| Item-based CF | 0.0726 | 0.0730 | 0.0901 | 0.4274 |
+| ALS | 0.0544 | 0.0692 | 0.0713 | 0.3666 |
+| LSH + BiRank | 0.0392 | 0.0357 | 0.0557 | 0.2855 |
+
+### Is the difference real? (paired, per user, 592 users)
+Mean difference LSH + BiRank minus the other method, bootstrap 95% CI, Wilcoxon signed-rank p:
+
+| Comparison (same candidates) | NDCG@10 diff (95% CI) | p | Recall@10 diff (95% CI) |
+|---|---|---|---|
+| vs LSH order | +0.0422 (0.0338 to 0.0508) | < 0.0001 | +0.0250 (0.0184 to 0.0321) |
+| vs Popularity | +0.0142 (0.0098 to 0.0190) | < 0.0001 | +0.0084 (0.0058 to 0.0113) |
+| vs Item-based CF | +0.0065 (0.0025 to 0.0106) | 0.0012 | +0.0024 (-0.0004 to 0.0051) |
+| vs ALS | +0.0079 (0.0026 to 0.0134) | 0.0033 | +0.0027 (-0.0002 to 0.0057) |
+
+BiRank clearly beats the LSH order and popularity ordering. Against Item-CF and ALS it has a small NDCG@10 advantage and no reliable recall difference. These are 16 tests on one split without multiple-comparison correction.
+
+### Runtime
+Google Colab (2 vCPU, 12 GB RAM, Intel Xeon 2.20 GHz):
+
+| Stage | Wall-clock |
+|---|---|
+| Item-CF (build + scoring) | 1.5 s |
+| ALS final training | 21.5 s |
+| BiRank re-rank (mean of 3 runs) | 5.4 s |
+| Preprocessing | 65.0 s |
+| Build features | 51.4 s |
+| LSH candidates | 106.7 s |
+| Finalize candidates | 41.8 s |
+
+Airflow in Docker (AMD Ryzen 5 7235HS, 8 logical processors), one run: preprocessing 1 m 29 s, build features 21.9 s, LSH candidates 52.9 s, finalize candidates 25.4 s, BiRank 2.1 s, evaluate 4.3 s; full DAG run 3 m 19 s. Spark times include JVM start-up and are single runs; the two machines are not comparable with each other.
+
+### Deployment
+- `Dockerfile` (Python 3.12 + Java 17) runs every script; `docker build -t recsys-pipeline .`.
+- `airflow/` holds the Docker Compose setup and the DAG `recsys_lsh_birank` (`data_preprocessing -> build_features -> lsh_candidates -> finalize_candidates -> birank_rerank -> evaluate`). To reproduce: create `airflow/.env` with `AIRFLOW_UID=50000` and `AIRFLOW_IMAGE_NAME=recsys-airflow:latest`, run `docker build -f airflow/Dockerfile -t recsys-airflow:latest .` from the repo root, then `docker compose up airflow-init` and `docker compose up -d` inside `airflow/`, and trigger the DAG at http://localhost:8080 (login airflow / airflow).
+- The DAG regenerates the candidates from raw MovieLens and reproduced the same metrics as the Colab run.
+- ALS runs in the notebook `notebooks/member3_evaluation.ipynb` (Spark), not in the DAG. The optional FastAPI endpoint was not built.
+
+### Limitations
+- The LSH configuration was chosen using test ratings, so absolute candidate recall is optimistic. Every method that uses the candidates shares this, so comparisons among them are fair.
+- BiRank was tuned on a validation split only, and ALS only on a validation split from `ratings_train`; the top ALS configurations differed by about 0.005 in validation recall.
+- Candidate recall caps the pipeline's accuracy: full-catalog Item-CF, ALS and popularity beat it end to end.
+- 8.34% of test rows (6.59% of liked ones) are movies absent from the training graph and cannot be recommended by any graph-based method.
+- On this small dataset the pipeline is slower than the baselines. Any claim that LSH scales better is an expectation, not something measured here.
+- Single dataset (MovieLens small), single chronological split, single-run timings, and different hardware for Colab and Airflow.
+
