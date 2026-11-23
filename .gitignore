@@ -16,7 +16,8 @@ data/processed/*
 !data/processed/member1_candidates_top100/
 !data/processed/member2_birank_ranked.parquet
 !data/processed/member2_birank_ranked_top20.parquet
-!data/processed/member2_birank_ranked_settings.jsonairflow/work/
+!data/processed/member2_birank_ranked_settings.json
 airflow/logs/
 airflow/work/
 airflow/logs/
+airflow/config/
