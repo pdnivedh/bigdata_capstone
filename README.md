@@ -268,15 +268,6 @@ versus `rank`.
   catalog. The difference is probably movies without genre tags being dropped from the
   LSH features (to be confirmed by Member 1).
 
-### Results (to be filled by Member 3)
-
-| Method | Precision@10 | Recall@10 | NDCG@10 |
-|---|---|---|---|
-| Popularity | | | |
-| LSH order | | | |
-| LSH + BiRank (proposed) | | | |
-| Item-based CF | | | |
-| ALS | | | |
 
 ## Member 3: Baselines, evaluation and deployment
 
