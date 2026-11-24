@@ -1,10 +1,19 @@
 .venv/
 __pycache__/
 *.pyc
-
-data/raw/
-data/processed/
-results/
-
 .env
 .vscode/
+*.tar.gz
+*.crc
+_SUCCESS
+
+data/raw/
+
+# data/processed: ignore everything, then allow the small final datasets
+data/processed/*
+!data/processed/ratings_train/
+!data/processed/ratings_test/
+!data/processed/member1_candidates_top100/
+!data/processed/member2_birank_ranked.parquet
+!data/processed/member2_birank_ranked_top20.parquet
+!data/processed/member2_birank_ranked_settings.json
