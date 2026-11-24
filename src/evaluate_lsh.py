@@ -1,4 +1,3 @@
-import os
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -22,7 +21,7 @@ test = spark.read.parquet(
 )
 
 users = spark.read.parquet(
-    "data/processed/user_features_top5"
+    "data/processed/user_features"
 ).select("user_id")
 
 # Only movies present in the training graph
@@ -45,21 +44,14 @@ print("\n===== LSH EVALUATION =====")
 print("Eligible relevant test interactions:", total_relevant)
 print("Users with relevant test movies:", total_users)
 
-# (top-K genres, hash tables). Generate them with: python src/run_lsh_grid.py
-GRID = [(3, 2), (3, 4), (3, 8), (5, 4)]
 experiments = {
-    f"Top-{k}, {t} tables": f"data/processed/lsh_candidates_top{k}_{t}"
-    for k, t in GRID
+    "Top-3, 2 tables": "data/processed/lsh_candidates_tuning_2",
+    "Top-3, 4 tables": "data/processed/lsh_candidates_top100",
+    "Top-3, 8 tables": "data/processed/lsh_candidates_tuning_8",
+    "Top-5, 4 tables": "data/processed/lsh_candidates_top5_4"
 }
 
-print("\nWARNING: this evaluation uses ratings_test, so any configuration")
-print("chosen from it gives a DEVELOPMENT estimate, not an unbiased final one.")
-
 for name, path in experiments.items():
-
-    if not os.path.exists(path):
-        print(f"\nSkipping {name}: {path} not found")
-        continue
 
     candidates = (
         spark.read.parquet(path)

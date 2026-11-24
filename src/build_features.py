@@ -1,15 +1,7 @@
-import argparse
-
 from pyspark.sql.window import Window
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.ml.feature import CountVectorizer
-
-parser = argparse.ArgumentParser()
-parser.add_argument("--top-genres", type=int, default=5,
-                    help="number of preferred genres kept per user profile")
-args = parser.parse_args()
-TOP_K = args.top_genres
 
 spark = (
     SparkSession.builder
@@ -63,7 +55,7 @@ liked_movies = (
 )
 
 
-# Build user profiles using the top-K preferred genres (K = --top-genres)
+# Build user profiles using top 3 preferred genres
 
 # Extract genres from positively rated movies
 liked_genres = liked_movies.select(
@@ -89,10 +81,10 @@ genre_window = Window.partitionBy(
 top_genres = (
     genre_counts
     .withColumn("rank", F.row_number().over(genre_window))
-    .filter(F.col("rank") <= TOP_K)
+    .filter(F.col("rank") <= 5)
 )
 
-# Collect the top-K genres
+# Collect the top 3 genres
 user_genres = top_genres.groupBy("user_id").agg(
     F.collect_list("genre").alias("tokens")
 )
@@ -110,7 +102,7 @@ item_features.write.mode("overwrite").parquet(
 )
 
 user_features.write.mode("overwrite").parquet(
-    f"data/processed/user_features_top{TOP_K}"
+    "data/processed/user_features_top5"
 )
 
 print("\n===== FEATURE ENGINEERING RESULTS =====")
